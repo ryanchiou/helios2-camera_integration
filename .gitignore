@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Captures are large and machine-specific; keep the folder, not its contents
+data/*
+!data/.gitkeep
+
+# LUCID's arena_api wheel is licensed software: download it, don't commit it
+vendor/
+*.whl
+
+# Written by the Arena SDK into the working directory whenever it is used
+persist.json
+
+# Editors and OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
