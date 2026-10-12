@@ -64,6 +64,9 @@ the camera before starting this application.**
 * **3D view**: the same frame as a point cloud in the camera's frame.
 * **Status bar**: frame rate, frame ID, share of valid pixels, and the median
   distance at the image centre (the `+` mark).
+* **Depth clip** hides points nearer than *Min* or farther than *Max* in the
+  depth map and the 3D view, for example to drop the background while aiming.
+  It is display only: captures still save every point.
 * **Capture frame** saves the next frame to the output folder.
 * **Camera settings** lists whichever tuning features the connected camera
   exposes (operating mode, exposure, accumulation, filters). Changing one

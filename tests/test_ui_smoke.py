@@ -50,3 +50,40 @@ def test_preview_streams_captures_and_shuts_down(tmp_path):
     finally:
         window.close()
     assert window._thread.isFinished()
+
+
+def test_depth_clip_hides_points_outside_the_range_but_captures_keep_them(tmp_path):
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(SimulatedCamera(fps=60, seed=0), tmp_path)
+    window.show()
+    try:
+        wait_until(app, lambda: window.frames_shown >= 3)
+        assert not window._clip_min_slider.isEnabled()
+
+        # The simulated table is at 0.90 m; the box and sphere stand above it.
+        window._clip_box.setChecked(True)
+        window._clip_min_slider.setValue(700)
+        window._clip_max_spin.setValue(0.85)
+        assert window._clip_min_spin.value() == 0.70
+        assert window._clip_max_slider.value() == 850
+        shown_before = window.frames_shown
+        wait_until(app, lambda: window.frames_shown > shown_before + 2)
+
+        frame = window._frame
+        shown = window._shown(frame)
+        depth = frame.xyz_m[..., 2][shown]
+        assert 0 < shown.sum() < frame.valid.sum()
+        assert depth.min() >= 0.70 and depth.max() <= 0.85
+
+        # Dragging one end past the other pushes the other along.
+        window._clip_min_spin.setValue(0.90)
+        assert window._clip_max_spin.value() == 0.90
+        window._clip_max_spin.setValue(0.85)
+        assert window._clip_min_spin.value() == 0.85
+
+        window._capture_button.click()
+        wait_until(app, lambda: window.last_capture is not None)
+        saved = load_capture(window.last_capture.npz)
+        assert saved.xyz_m[..., 2][saved.valid].max() > 0.86
+    finally:
+        window.close()

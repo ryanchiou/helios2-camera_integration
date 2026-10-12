@@ -37,6 +37,7 @@ REFRESH_INTERVAL_MS = 10
 CENTRE_WINDOW_PX = 10  # half-size of the patch behind the centre-distance readout
 POINT_STEPS = (1, 2, 3, 4, 6, 8)
 AXIS_LENGTH_M = 0.1
+CLIP_SLIDER_MAX_MM = 3000  # the spin boxes beside the sliders go further, up to 10 m
 
 
 def to_display(points_m: np.ndarray) -> np.ndarray:
@@ -51,18 +52,29 @@ def to_display(points_m: np.ndarray) -> np.ndarray:
     return display
 
 
-def depth_colour_indices(frame: Frame, near_m: float, far_m: float) -> np.ndarray:
+def depth_colour_indices(frame: Frame, near_m: float, far_m: float,
+                         shown: np.ndarray | None = None) -> np.ndarray:
     """Each pixel's row in ``DEPTH_LUT``: 0 for no depth, 1-255 from near to far.
 
     Colouring goes through a table over all 65536 raw Z counts, which is far
-    cheaper per frame than arithmetic on every pixel.
+    cheaper per frame than arithmetic on every pixel. Pixels outside ``shown``
+    (default: the valid ones) get 0, like pixels without depth.
     """
     z_m = (RAW_COUNTS * frame.transform.scale_mm[2] + frame.transform.offset_mm[2]) / 1000.0
     span = max(far_m - near_m, 1e-6)
     table = (1.0 + np.clip((z_m - near_m) * (254.0 / span), 0.0, 254.0)).astype(np.uint8)
     indices = table[frame.raw[..., 2]]
-    indices[~frame.valid] = 0
+    indices[~(frame.valid if shown is None else shown)] = 0
     return indices
+
+
+def clip_mask(frame: Frame, z_min_m: float, z_max_m: float) -> np.ndarray:
+    """Valid pixels whose depth lies within ``[z_min_m, z_max_m]``.
+
+    Display only: captures are saved from the frame itself, so they keep every point.
+    """
+    z_m = frame.xyz_m[..., 2]
+    return frame.valid & (z_m >= z_min_m) & (z_m <= z_max_m)
 
 
 def intensity_image(frame: Frame, peak: float) -> np.ndarray:
@@ -258,6 +270,7 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow(reset_button)
         layout.addWidget(display_box)
         self._on_auto_range_toggled(True)
+        layout.addWidget(self._build_clip_box())
 
         self._controls_box = QtWidgets.QGroupBox("Camera settings")
         self._controls_form = QtWidgets.QFormLayout(self._controls_box)
@@ -267,6 +280,64 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addStretch(1)
         panel.setMinimumWidth(260)
         return panel
+
+    def _build_clip_box(self) -> QtWidgets.QGroupBox:
+        box = QtWidgets.QGroupBox("Depth clip")
+        box.setToolTip("Hides points outside the range in the depth map and the 3D view.\n"
+                       "Display only: captures still save every point.")
+        form = QtWidgets.QFormLayout(box)
+        self._clip_box = QtWidgets.QCheckBox("Show only points between")
+        self._clip_min_slider, self._clip_min_spin = self._clip_slider(0.30)
+        self._clip_max_slider, self._clip_max_spin = self._clip_slider(1.50)
+        # Keep min <= max by pushing the other end along.
+        self._clip_min_spin.valueChanged.connect(
+            lambda value: self._clip_max_spin.setValue(max(value, self._clip_max_spin.value())))
+        self._clip_max_spin.valueChanged.connect(
+            lambda value: self._clip_min_spin.setValue(min(value, self._clip_min_spin.value())))
+        self._clip_box.toggled.connect(self._on_clip_toggled)
+        form.addRow(self._clip_box)
+        form.addRow("Min (m)", self._clip_row(self._clip_min_slider, self._clip_min_spin))
+        form.addRow("Max (m)", self._clip_row(self._clip_max_slider, self._clip_max_spin))
+        self._on_clip_toggled(False)
+        return box
+
+    def _clip_slider(self, value: float) -> tuple[QtWidgets.QSlider, QtWidgets.QDoubleSpinBox]:
+        """A millimetre slider tied to a metre spin box."""
+        slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        slider.setRange(0, CLIP_SLIDER_MAX_MM)
+        slider.setSingleStep(5)
+        slider.setPageStep(50)
+        spin = self._metre_spin(value)
+        spin.setDecimals(3)
+        spin.setSingleStep(0.005)
+        slider.setValue(round(value * 1000))
+        slider.valueChanged.connect(lambda mm: spin.setValue(mm / 1000.0))
+
+        def follow(metres: float) -> None:
+            slider.blockSignals(True)
+            slider.setValue(min(round(metres * 1000), CLIP_SLIDER_MAX_MM))
+            slider.blockSignals(False)
+        spin.valueChanged.connect(follow)
+        return slider, spin
+
+    @staticmethod
+    def _clip_row(slider: QtWidgets.QSlider, spin: QtWidgets.QDoubleSpinBox) -> QtWidgets.QWidget:
+        row = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(slider, 1)
+        layout.addWidget(spin)
+        return row
+
+    def _on_clip_toggled(self, clip: bool) -> None:
+        for widget in (self._clip_min_slider, self._clip_min_spin,
+                       self._clip_max_slider, self._clip_max_spin):
+            widget.setEnabled(clip)
+
+    def _shown(self, frame: Frame) -> np.ndarray:
+        if not self._clip_box.isChecked():
+            return frame.valid
+        return clip_mask(frame, self._clip_min_spin.value(), self._clip_max_spin.value())
 
     @staticmethod
     def _metre_spin(value: float) -> QtWidgets.QDoubleSpinBox:
@@ -375,11 +446,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._frame = frame
         self.frames_shown += 1
-        near, far = self._update_depth_range(frame)
-        colour_indices = depth_colour_indices(frame, near, far)
+        shown = self._shown(frame)
+        near, far = self._update_depth_range(frame, shown)
+        colour_indices = depth_colour_indices(frame, near, far, shown)
         self._draw_images(frame, colour_indices)
         self._depth_bar.setLevels((near, far))
-        self._draw_cloud(frame, colour_indices)
+        self._draw_cloud(frame, colour_indices, shown)
         self._update_readouts(frame)
         if not self._view_initialised:
             self._view_initialised = True
@@ -387,11 +459,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._depth_view.autoRange(padding=0)
             self.reset_view()
 
-    def _update_depth_range(self, frame: Frame) -> tuple[float, float]:
+    def _update_depth_range(self, frame: Frame, shown: np.ndarray) -> tuple[float, float]:
         if not self._auto_range_box.isChecked():
             near, far = self._near_spin.value(), self._far_spin.value()
             return (near, far) if far > near else (near, near + 0.01)
-        sample = frame.xyz_m[::4, ::4, 2][frame.valid[::4, ::4]]
+        sample = frame.xyz_m[::4, ::4, 2][shown[::4, ::4]]
         if sample.size:
             near, far = np.percentile(sample, (1, 99))
             if self._depth_range is not None:  # ease towards the new range to avoid flicker
@@ -416,11 +488,11 @@ class MainWindow(QtWidgets.QMainWindow):
             for mark in self._centre_marks:
                 mark.setData(pos=[(frame.width / 2, frame.height / 2)])
 
-    def _draw_cloud(self, frame: Frame, colour_indices: np.ndarray) -> None:
+    def _draw_cloud(self, frame: Frame, colour_indices: np.ndarray, shown: np.ndarray) -> None:
         if self._cloud_item is None:
             return
         step = self._step_combo.currentData()
-        keep = frame.valid[::step, ::step]
+        keep = shown[::step, ::step]
         points = frame.xyz_m[::step, ::step][keep]
         if not len(points):
             self._cloud_item.setData(pos=np.zeros((0, 3), dtype=np.float32))
