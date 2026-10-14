@@ -64,7 +64,8 @@ the camera before starting this application.**
 * **3D view**: the same frame as a point cloud in the camera's frame.
 * **Status bar**: frame rate, frame ID, share of valid pixels, and the median
   distance at the image centre (the `+` mark).
-* **Capture frame** saves the next frame to the output folder.
+* **Capture frame** saves the next frame, with a screenshot of the window, to its
+  own folder in the output folder.
 * **Camera settings** tab: whichever tuning features the connected camera
   exposes, in three groups. Hover over a setting for what it does. Changing one
   briefly restarts the stream.
@@ -86,11 +87,14 @@ the camera before starting this application.**
 
 ### What a capture contains
 
+Each capture is a folder `capture_<time>/` in the output folder, holding:
+
 | File | Contents |
 |---|---|
 | `capture_<time>.npz` | Raw `(480, 640, 4)` uint16 payload, per-axis scale and offset, validity mask. The record of truth. |
 | `capture_<time>.json` | Camera identity, settings, frame ID, timestamps, software versions, and a `robot_pose` slot for later. |
 | `capture_<time>.ply` | Valid points in **metres**, camera frame, with an `intensity` property. |
+| `capture_<time>_screenshot.png` | Live preview only: the whole window (image views, 3D view and side panel) showing the captured frame. |
 | `capture_<time>_arena.ply` | Optional: the same frame written by LUCID's own library, in **millimetres**, for cross-checking. |
 
 ## Using the camera from code

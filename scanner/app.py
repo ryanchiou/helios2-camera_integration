@@ -16,8 +16,8 @@ import logging
 import sys
 from pathlib import Path
 
-from .camera import (Camera, CameraError, HeliosCamera, SimulatedCamera, capture_name,
-                     save_capture)
+from .camera import (Camera, CameraError, HeliosCamera, SimulatedCamera, capture_folder,
+                     capture_name, save_capture)
 
 DEFAULT_CAPTURE_DIR = Path("data")
 
@@ -71,7 +71,7 @@ def command_capture(args) -> int:
         name = capture_name()
         native_ply = None
         if args.native_ply and camera.supports_native_ply:
-            native_ply = args.out / f"{name}_arena.ply"
+            native_ply = capture_folder(args.out, name) / f"{name}_arena.ply"
         if args.free_run:
             camera.start()
             # Drop one frame so the one kept was exposed after the stream started.

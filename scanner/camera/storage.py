@@ -1,12 +1,15 @@
 """Saving and reloading captures.
 
-Each capture is three files sharing one name:
+Each capture is a folder ``<name>/`` holding files that share its name:
 
 * ``<name>.npz``  the raw camera payload, its scale/offsets and the validity
   mask. This is the record of truth; everything else can be rebuilt from it.
 * ``<name>.json`` human-readable metadata: camera, settings, timestamps and,
   once the robot is integrated, the pose the frame was taken from.
 * ``<name>.ply``  the valid points in metres, for viewing and exchange.
+
+The live preview adds ``<name>_screenshot.png``, and an optional
+``<name>_arena.ply`` is written by LUCID's own library.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from __future__ import annotations
 import json
 import platform
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,12 +35,24 @@ class CapturePaths:
     metadata: Path
     ply: Path | None = None
     native_ply: Path | None = None
+    screenshot: Path | None = None
+
+    @property
+    def folder(self) -> Path:
+        return self.npz.parent
 
 
 def capture_name(when: float | None = None) -> str:
     """A unique, sortable capture name based on the local time."""
     stamp = datetime.fromtimestamp(time.time() if when is None else when)
     return "capture_" + stamp.strftime("%Y%m%d_%H%M%S_%f")[:-3]
+
+
+def capture_folder(directory: Path, name: str) -> Path:
+    """The folder that holds capture ``name`` under ``directory``, created if needed."""
+    folder = Path(directory) / name
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 
 def write_ply(path: Path, points_m: np.ndarray, intensity: np.ndarray | None = None,
@@ -71,13 +86,12 @@ def save_capture(frame: Frame, directory: Path, name: str | None = None, *,
                  settings: dict[str, Any] | None = None,
                  robot_pose: Any = None, ply: bool = True,
                  native_ply: Path | None = None) -> CapturePaths:
-    """Save one frame and its metadata, returning the paths written."""
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
+    """Save one frame and its metadata into ``directory/<name>/``, returning the paths written."""
     name = name or capture_name()
-    paths = CapturePaths(npz=directory / f"{name}.npz",
-                         metadata=directory / f"{name}.json",
-                         ply=directory / f"{name}.ply" if ply else None,
+    folder = capture_folder(directory, name)
+    paths = CapturePaths(npz=folder / f"{name}.npz",
+                         metadata=folder / f"{name}.json",
+                         ply=folder / f"{name}.ply" if ply else None,
                          native_ply=native_ply)
 
     np.savez_compressed(paths.npz, raw=frame.raw, valid=frame.valid,
@@ -120,6 +134,14 @@ def save_capture(frame: Frame, directory: Path, name: str | None = None, *,
     }
     paths.metadata.write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
     return paths
+
+
+def add_capture_file(paths: CapturePaths, key: str, path: Path) -> CapturePaths:
+    """Record a file written into a capture after it was saved, such as a screenshot."""
+    metadata = json.loads(paths.metadata.read_text(encoding="utf-8"))
+    metadata["files"][key] = Path(path).name
+    paths.metadata.write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
+    return replace(paths, **{key: Path(path)})
 
 
 def load_capture(npz_path: Path) -> Frame:

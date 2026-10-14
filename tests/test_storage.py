@@ -3,7 +3,8 @@ import json
 import numpy as np
 import pytest
 
-from scanner.camera import SimulatedCamera, load_capture, save_capture, write_ply
+from scanner.camera import (SimulatedCamera, add_capture_file, load_capture, save_capture,
+                            write_ply)
 
 
 @pytest.fixture(scope="module")
@@ -28,6 +29,8 @@ def test_capture_round_trips_exactly(frame_and_camera, tmp_path):
     frame, camera = frame_and_camera
     paths = save_capture(frame, tmp_path, "view_01", camera_info=camera.info,
                          settings=camera.read_settings())
+    assert paths.folder == tmp_path / "view_01"
+    assert paths.npz.parent == paths.metadata.parent == paths.ply.parent == paths.folder
     loaded = load_capture(paths.npz)
     assert np.array_equal(loaded.raw, frame.raw)
     assert np.array_equal(loaded.valid, frame.valid)
@@ -64,7 +67,18 @@ def test_ply_holds_the_valid_points_in_metres(frame_and_camera, tmp_path):
 def test_ply_can_be_skipped(frame_and_camera, tmp_path):
     frame, _ = frame_and_camera
     paths = save_capture(frame, tmp_path, "view_04", ply=False)
-    assert paths.ply is None and not (tmp_path / "view_04.ply").exists()
+    assert paths.ply is None and not (tmp_path / "view_04" / "view_04.ply").exists()
+
+
+def test_files_added_later_are_recorded(frame_and_camera, tmp_path):
+    frame, _ = frame_and_camera
+    paths = save_capture(frame, tmp_path, "view_05")
+    image = paths.folder / "view_05_screenshot.png"
+    image.write_bytes(b"png")
+    paths = add_capture_file(paths, "screenshot", image)
+    assert paths.screenshot == image
+    metadata = json.loads(paths.metadata.read_text(encoding="utf-8"))
+    assert metadata["files"]["screenshot"] == "view_05_screenshot.png"
 
 
 def test_ply_is_readable_by_open3d(tmp_path):

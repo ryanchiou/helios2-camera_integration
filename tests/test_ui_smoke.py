@@ -40,7 +40,9 @@ def test_preview_streams_captures_and_shuts_down(tmp_path):
         window._capture_button.click()
         wait_until(app, lambda: window.last_capture is not None)
         paths = window.last_capture
+        assert paths.folder.parent == tmp_path
         assert paths.npz.exists() and paths.metadata.exists() and paths.ply.exists()
+        assert paths.screenshot.parent == paths.folder and paths.screenshot.stat().st_size > 0
         assert load_capture(paths.npz).valid_count > 0
 
         window._stream_button.click()  # stop

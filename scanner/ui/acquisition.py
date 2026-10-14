@@ -12,7 +12,7 @@ from typing import Any
 from PySide6 import QtCore
 
 from ..camera import (Camera, CameraError, Frame, FrameTimeoutError,
-                      IncompleteFrameError, capture_name, save_capture)
+                      IncompleteFrameError, capture_folder, capture_name, save_capture)
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class AcquisitionThread(QtCore.QThread):
     opened = QtCore.Signal(object, object)  # CameraInfo, list[ControlSpec]
     controls_changed = QtCore.Signal(object)  # list[ControlSpec]
     streaming_changed = QtCore.Signal(bool)
-    capture_saved = QtCore.Signal(object)  # CapturePaths
+    capture_saved = QtCore.Signal(object, object)  # CapturePaths, the Frame saved
     warning = QtCore.Signal(str)
     failed = QtCore.Signal(str)  # the camera is unusable and the thread is exiting
 
@@ -131,7 +131,7 @@ class AcquisitionThread(QtCore.QThread):
         if self._capture_native is not None:
             name = capture_name()
             if self._capture_native and camera.supports_native_ply:
-                native_ply = self._capture_dir / f"{name}_arena.ply"
+                native_ply = capture_folder(self._capture_dir, name) / f"{name}_arena.ply"
         try:
             frame = camera.grab(timeout_s=GRAB_TIMEOUT_S, native_ply=native_ply)
         except FrameTimeoutError:
@@ -165,4 +165,4 @@ class AcquisitionThread(QtCore.QThread):
             except (OSError, CameraError) as exc:
                 self.warning.emit(f"Capture could not be saved: {exc}")
             else:
-                self.capture_saved.emit(paths)
+                self.capture_saved.emit(paths, frame)

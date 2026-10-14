@@ -9,7 +9,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..camera import Camera, CameraInfo, CapturePaths, ControlSpec, Frame
+from ..camera import Camera, CameraInfo, CapturePaths, ControlSpec, Frame, add_capture_file
 from ..camera.config import SETTING_GROUPS
 from .acquisition import AcquisitionThread
 
@@ -252,12 +252,15 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             import pyqtgraph.opengl as gl
 
-            view = gl.GLViewWidget()
+            from .cloud_view import CursorGLViewWidget
+
+            view = CursorGLViewWidget()
             view.setBackgroundColor("#0c0c10")
             item = gl.GLScatterPlotItem(pos=np.zeros((1, 3), dtype=np.float32),
                                         color=(1.0, 1.0, 1.0, 1.0), size=2.0, pxMode=True)
             item.setGLOptions("opaque")
             view.addItem(item)
+            view.pick_item = item
             # Camera axes at the origin: X red, Y green (down), Z blue (forward).
             for axis, colour in ((0, (0.9, 0.25, 0.25, 1)), (1, (0.3, 0.8, 0.3, 1)),
                                  (2, (0.35, 0.55, 1.0, 1))):
@@ -280,7 +283,8 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(view, 1)
         legend = QtWidgets.QLabel(
             "Camera frame at the origin:  X red  ·  Y green (down)  ·  Z blue (forward)."
-            "   Drag to orbit, scroll to zoom, Ctrl+drag to pan.")
+            "   About the point under the cursor: drag to orbit, scroll to zoom,"
+            " Ctrl+drag or middle-drag to pan.")
         legend.setContentsMargins(8, 4, 8, 4)
         layout.addWidget(legend)
         return container
@@ -470,10 +474,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stream_button.setText("Stop stream" if streaming else "Start stream")
         self._capture_button.setEnabled(streaming and not self._failed)
 
-    def _on_capture_saved(self, paths: CapturePaths) -> None:
+    def _on_capture_saved(self, paths: CapturePaths, frame: Frame) -> None:
+        # Show the saved frame rather than a newer one, so the screenshot matches
+        # the data beside it. The next refresh goes back to the live stream.
+        self._show(frame)
+        screenshot = paths.folder / f"{paths.npz.stem}_screenshot.png"
+        saved = f"Saved {paths.folder.name}"
+        if self.save_screenshot(screenshot):
+            paths = add_capture_file(paths, "screenshot", screenshot)
+        else:
+            saved += " (screenshot failed)"
         self.last_capture = paths
-        self._capture_label.setText(f"Saved {paths.npz.stem}\nin {paths.npz.parent}")
-        self.statusBar().showMessage(f"Saved {paths.npz.stem}", 5000)
+        self._capture_label.setText(f"{saved}\nin {paths.folder.parent}")
+        self.statusBar().showMessage(saved, 5000)
 
     def _on_failed(self, message: str) -> None:
         self._failed = True
@@ -620,8 +633,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self._thread.fps:
                 self._fps_label.setText("-- fps")
             return
-        self._frame = frame
         self.frames_shown += 1
+        self._show(frame)
+
+    def _show(self, frame: Frame) -> None:
+        self._frame = frame
         shown = self._shown(frame)
         near, far = self._update_depth_range(frame, shown)
         colour_indices = depth_colour_indices(frame, near, far, shown)
@@ -717,8 +733,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # lifecycle ---------------------------------------------------------------
 
-    def save_screenshot(self, path: Path) -> None:
-        self.grab().save(str(path))
+    def save_screenshot(self, path: Path) -> bool:
+        """Save the whole window (image views, 3D view and side panel) as an image."""
+        return self.grab().save(str(path))
 
     def closeEvent(self, event) -> None:
         self._timer.stop()

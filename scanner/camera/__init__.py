@@ -8,7 +8,8 @@ from .config import CameraSettings
 from .decode import decode_abcy16, frame_from_raw
 from .helios import HeliosCamera
 from .simulated import SimulatedCamera
-from .storage import CapturePaths, capture_name, load_capture, save_capture, write_ply
+from .storage import (CapturePaths, add_capture_file, capture_folder, capture_name,
+                      load_capture, save_capture, write_ply)
 from .types import (CameraError, CameraInfo, CameraNotFoundError, ControlSpec,
                     CoordinateTransform, Frame, FrameTimeoutError, IncompleteFrameError)
 
@@ -17,5 +18,6 @@ __all__ = [
     "Frame", "CameraInfo", "ControlSpec", "CoordinateTransform",
     "CameraError", "CameraNotFoundError", "FrameTimeoutError", "IncompleteFrameError",
     "decode_abcy16", "frame_from_raw",
-    "CapturePaths", "capture_name", "save_capture", "load_capture", "write_ply",
+    "CapturePaths", "capture_name", "capture_folder", "save_capture", "add_capture_file",
+    "load_capture", "write_ply",
 ]
