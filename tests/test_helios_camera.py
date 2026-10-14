@@ -252,6 +252,31 @@ def test_open_configures_stream_format_and_settings_in_order(arena, device):
     assert arena.destroyed == [device]
 
 
+def test_modes_are_written_before_exposure_and_filters_before_thresholds(arena, device):
+    log = device.writes
+    device.nodemap.update({
+        "Scan3dHDRMode": NodeEnumeration("Scan3dHDRMode", "Off", log, ["Off", "StandardHDR"]),
+        "Scan3dFlyingPixelsRemovalEnable": NodeBoolean("Scan3dFlyingPixelsRemovalEnable",
+                                                       False, log),
+        "Scan3dFlyingPixelsDistanceThreshold": NodeInteger("Scan3dFlyingPixelsDistanceThreshold",
+                                                           1, log),
+        "Scan3dDistanceMax": NodeInteger("Scan3dDistanceMax", 8, log),
+    })
+    settings = CameraSettings(distance_max_mm=6, flying_pixels_threshold_mm=5,
+                              flying_pixels_removal=True, hdr_mode="StandardHDR",
+                              operating_mode="ModeB")
+    with HeliosCamera(settings=settings) as camera:
+        assert camera.read_settings()["Scan3dFlyingPixelsDistanceThreshold"] == 5
+        assert {spec.name for spec in camera.controls()} >= {
+            "Scan3dHDRMode", "Scan3dFlyingPixelsRemovalEnable",
+            "Scan3dFlyingPixelsDistanceThreshold", "Scan3dDistanceMax"}
+    names = [name for name, _ in log]
+    assert (names.index("Scan3dOperatingMode") < names.index("Scan3dHDRMode")
+            < names.index("Scan3dFlyingPixelsRemovalEnable")
+            < names.index("Scan3dFlyingPixelsDistanceThreshold")
+            < names.index("Scan3dDistanceMax"))
+
+
 def test_grab_decodes_with_per_axis_calibration_and_requeues(arena, device):
     with HeliosCamera() as camera:
         camera.start()

@@ -3,6 +3,7 @@
 import os
 import time
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -32,8 +33,9 @@ def test_preview_streams_captures_and_shuts_down(tmp_path):
         wait_until(app, lambda: window.frames_shown >= 5)
         assert "SIM0001" in window.windowTitle()
         assert window._capture_button.isEnabled()
-        assert set(window._control_widgets) == {"Scan3dImageAccumulation",
-                                                "Scan3dSpatialFilterEnable"}
+        assert "Scan3dFlyingPixelsDistanceThreshold" in window._control_widgets
+        assert window._setting_forms["Noise filters"][0].isVisibleTo(window)
+        assert not window._setting_forms["Other"][0].isVisibleTo(window)
 
         window._capture_button.click()
         wait_until(app, lambda: window.last_capture is not None)
@@ -50,6 +52,61 @@ def test_preview_streams_captures_and_shuts_down(tmp_path):
     finally:
         window.close()
     assert window._thread.isFinished()
+
+
+def test_settings_follow_the_camera_state(tmp_path):
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(SimulatedCamera(fps=60, seed=0), tmp_path)
+    window.show()
+    try:
+        wait_until(app, lambda: window.frames_shown >= 2)
+        widgets = window._control_widgets
+        # A threshold is greyed out while its filter is off.
+        assert not widgets["Scan3dFlyingPixelsDistanceThreshold"].isEnabled()
+        assert widgets["Scan3dConfidenceThresholdMin"].isEnabled()
+        widgets["Scan3dFlyingPixelsRemovalEnable"].click()
+        wait_until(app, lambda: widgets["Scan3dFlyingPixelsDistanceThreshold"].isEnabled())
+
+        # HDR takes over from accumulation, which the camera then locks.
+        window._thread.set_control("Scan3dHDRMode", "StandardHDR")
+        wait_until(app, lambda: not widgets["Scan3dImageAccumulation"].isEnabled())
+        assert "Locked" in widgets["Scan3dImageAccumulation"].toolTip()
+        shown = window.frames_shown
+        wait_until(app, lambda: window.frames_shown > shown + 2)
+    finally:
+        window.close()
+
+
+def test_distance_limit_sliders_drop_points_in_the_camera(tmp_path):
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(SimulatedCamera(fps=60, seed=0), tmp_path)
+    window.show()
+    try:
+        wait_until(app, lambda: window.frames_shown >= 2)
+        widgets = window._control_widgets
+
+        def slider(name):
+            return widgets[name].findChild(QtWidgets.QSlider)
+
+        def spin(name):
+            return widgets[name].findChild(QtWidgets.QSpinBox)
+
+        # Raising the minimum past the maximum pushes the maximum along first.
+        slider("Scan3dDistanceMax").setValue(880)
+        wait_until(app, lambda: spin("Scan3dDistanceMax").value() == 880)
+        slider("Scan3dDistanceMin").setValue(900)
+        wait_until(app, lambda: spin("Scan3dDistanceMin").value() == 900
+                   and spin("Scan3dDistanceMax").value() == 900)
+
+        # Dropped in the camera, so the saved capture lacks them too.
+        slider("Scan3dDistanceMin").setValue(0)
+        wait_until(app, lambda: spin("Scan3dDistanceMin").value() == 0)
+        window._capture_button.click()
+        wait_until(app, lambda: window.last_capture is not None)
+        saved = load_capture(window.last_capture.npz)
+        assert np.linalg.norm(saved.points_m(), axis=1).max() <= 0.901
+    finally:
+        window.close()
 
 
 def test_depth_clip_hides_points_outside_the_range_but_captures_keep_them(tmp_path):

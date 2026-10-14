@@ -10,6 +10,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..camera import Camera, CameraInfo, CapturePaths, ControlSpec, Frame
+from ..camera.config import SETTING_GROUPS
 from .acquisition import AcquisitionThread
 
 log = logging.getLogger(__name__)
@@ -38,6 +39,70 @@ CENTRE_WINDOW_PX = 10  # half-size of the patch behind the centre-distance reado
 POINT_STEPS = (1, 2, 3, 4, 6, 8)
 AXIS_LENGTH_M = 0.1
 CLIP_SLIDER_MAX_MM = 3000  # the spin boxes beside the sliders go further, up to 10 m
+
+# Label and tooltip for each camera setting, paraphrasing LUCID's HPN003S
+# technical reference. Settings not listed here are shown by their feature name.
+SETTING_INFO = {
+    "Scan3dOperatingMode": (
+        "Operating mode",
+        "Working distance and modulation frequency.\n"
+        "Dual-frequency modes run at about half the frame rate."),
+    "Scan3dHDRMode": (
+        "HDR mode",
+        "Fuses 62.5, 250 and 1000 µs exposures, for scenes with both bright and dark parts.\n"
+        "Low-noise modes also average several 1000 µs exposures, at 5 down to 0.88 fps.\n"
+        "While HDR is on, image accumulation is unavailable."),
+    "ExposureTimeSelector": (
+        "Exposure",
+        "Longer for far or dark targets; shorter if bright parts saturate\n"
+        "(holes in the depth map)."),
+    "ConversionGain": (
+        "Gain",
+        "High gain for far or dark targets. It amplifies noise as well."),
+    "Scan3dImageAccumulation": (
+        "Accumulation",
+        "Averages this many frames: less noise, and a frame rate lower by the same factor."),
+    "Scan3dSpatialFilterEnable": (
+        "Spatial filter",
+        "Smooths depth across neighbouring pixels. Lowers noise but can soften edges."),
+    "Scan3dFlyingPixelsRemovalEnable": (
+        "Flying pixel filter",
+        "Removes pixels whose depth jumps away from their neighbours,\n"
+        "such as the stray points along object edges."),
+    "Scan3dFlyingPixelsDistanceThreshold": (
+        "Flying pixel threshold (mm)",
+        "Depth jump that marks a pixel as flying. LUCID's example uses 20 mm."),
+    "Scan3dConfidenceThresholdEnable": (
+        "Confidence filter",
+        "Drops pixels whose return is too weak to trust.\n"
+        "While it is on, saturated pixels are dropped too."),
+    "Scan3dConfidenceThresholdMin": (
+        "Confidence minimum",
+        "Pixels below this confidence are dropped. Higher: fewer but more reliable points."),
+    "Scan3dDistanceMin": (
+        "Minimum distance (mm)",
+        "Radial distance below which the camera drops points. A non-zero minimum\n"
+        "also moves the distance at which the operating mode's range wraps around."),
+    "Scan3dDistanceMax": (
+        "Maximum distance (mm)",
+        "Radial distance beyond which the camera drops points."),
+}
+# A threshold only matters while its filter is switched on.
+SETTING_PARENTS = {
+    "Scan3dFlyingPixelsDistanceThreshold": "Scan3dFlyingPixelsRemovalEnable",
+    "Scan3dConfidenceThresholdMin": "Scan3dConfidenceThresholdEnable",
+}
+GROUP_NOTES = {
+    "Distance limits (removes points)":
+        "Applied in the camera: points outside the limits are not saved. "
+        "To hide points without losing them, use the Display tab.",
+}
+# Settings shown as a slider beside a spin box, and the setting each must not
+# cross: +1 for a minimum that must stay at or below its partner, -1 for a maximum.
+SLIDER_LIMITS = {
+    "Scan3dDistanceMin": ("Scan3dDistanceMax", +1),
+    "Scan3dDistanceMax": ("Scan3dDistanceMin", -1),
+}
 
 
 def to_display(points_m: np.ndarray) -> np.ndarray:
@@ -97,6 +162,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._view_initialised = False
         self._failed = False
         self._control_widgets: dict[str, QtWidgets.QWidget] = {}
+        self._control_values: dict[str, object] = {}  # as last reported by the camera
         self.frames_shown = 0
         self.last_capture: CapturePaths | None = None
 
@@ -128,7 +194,7 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.addWidget(self._build_image_views())
         splitter.addWidget(self._build_cloud_view())
         splitter.addWidget(self._build_side_panel(camera))
-        splitter.setSizes([520, 700, 280])
+        splitter.setSizes([520, 660, 320])
         splitter.setStretchFactor(1, 1)
 
         central = QtWidgets.QWidget()
@@ -245,9 +311,52 @@ class MainWindow(QtWidgets.QMainWindow):
             camera_layout.addWidget(widget)
         layout.addWidget(camera_box)
 
-        display_box = QtWidgets.QGroupBox("Display")
-        form = QtWidgets.QFormLayout(display_box)
-        self._auto_range_box = QtWidgets.QCheckBox("Auto depth range")
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(self._scrolling(self._build_settings_tab()), "Camera settings")
+        tabs.addTab(self._scrolling(self._build_display_tab()), "Display")
+        layout.addWidget(tabs, 1)
+        panel.setMinimumWidth(300)
+        return panel
+
+    @staticmethod
+    def _scrolling(widget: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
+        area = QtWidgets.QScrollArea()
+        area.setWidget(widget)
+        area.setWidgetResizable(True)
+        area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        return area
+
+    def _build_settings_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        self._settings_hint = QtWidgets.QLabel("Waiting for the camera...")
+        self._settings_hint.setWordWrap(True)
+        layout.addWidget(self._settings_hint)
+        # One box per group; settings the camera lacks are left out, and a box
+        # with none of its settings stays hidden.
+        self._setting_forms: dict[str, tuple[QtWidgets.QGroupBox, QtWidgets.QFormLayout]] = {}
+        for title in (*(title for title, _ in SETTING_GROUPS), "Other"):
+            box = QtWidgets.QGroupBox(title)
+            form = QtWidgets.QFormLayout(box)
+            form.setFieldGrowthPolicy(
+                QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            box.hide()
+            layout.addWidget(box)
+            self._setting_forms[title] = (box, form)
+        layout.addStretch(1)
+        return tab
+
+    def _build_display_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        colour_box = QtWidgets.QGroupBox("Colour scale")
+        colour_box.setToolTip("Depth range the colours span. Points outside it keep\n"
+                              "the end colours; nothing is hidden.")
+        colour_form = QtWidgets.QFormLayout(colour_box)
+        view_box = QtWidgets.QGroupBox("3D view")
+        form = QtWidgets.QFormLayout(view_box)
+        self._auto_range_box = QtWidgets.QCheckBox("Fit to the scene")
         self._auto_range_box.setChecked(True)
         self._auto_range_box.toggled.connect(self._on_auto_range_toggled)
         self._near_spin = self._metre_spin(0.30)
@@ -262,29 +371,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._size_spin.setValue(2.0)
         reset_button = QtWidgets.QPushButton("Reset 3D view")
         reset_button.clicked.connect(self.reset_view)
-        form.addRow(self._auto_range_box)
-        form.addRow("Near (m)", self._near_spin)
-        form.addRow("Far (m)", self._far_spin)
-        form.addRow("3D points", self._step_combo)
+        colour_form.addRow(self._auto_range_box)
+        colour_form.addRow("Near (m)", self._near_spin)
+        colour_form.addRow("Far (m)", self._far_spin)
+        form.addRow("Points", self._step_combo)
         form.addRow("Point size", self._size_spin)
         form.addRow(reset_button)
-        layout.addWidget(display_box)
-        self._on_auto_range_toggled(True)
         layout.addWidget(self._build_clip_box())
-
-        self._controls_box = QtWidgets.QGroupBox("Camera settings")
-        self._controls_form = QtWidgets.QFormLayout(self._controls_box)
-        layout.addWidget(self._controls_box)
-        self._controls_box.hide()
-
+        layout.addWidget(colour_box)
+        layout.addWidget(view_box)
+        self._on_auto_range_toggled(True)
         layout.addStretch(1)
-        panel.setMinimumWidth(260)
-        return panel
+        return tab
 
     def _build_clip_box(self) -> QtWidgets.QGroupBox:
-        box = QtWidgets.QGroupBox("Depth clip")
+        box = QtWidgets.QGroupBox("Hide points (view only)")
         box.setToolTip("Hides points outside the range in the depth map and the 3D view.\n"
-                       "Display only: captures still save every point.")
+                       "Display only: captures still save every point.\n"
+                       "To drop points from the data, use the camera's distance limits.")
         form = QtWidgets.QFormLayout(box)
         self._clip_box = QtWidgets.QCheckBox("Show only points between")
         self._clip_min_slider, self._clip_min_spin = self._clip_slider(0.30)
@@ -401,19 +505,53 @@ class MainWindow(QtWidgets.QMainWindow):
                                            distance=1.15 * depth, elevation=20, azimuth=-75)
 
     def _set_controls(self, controls: list[ControlSpec]) -> None:
-        """Rebuild the settings form from what the camera reports."""
-        while self._controls_form.rowCount():
-            self._controls_form.removeRow(0)
+        """Rebuild the settings tab from what the camera reports."""
+        for _, form in self._setting_forms.values():
+            while form.rowCount():
+                form.removeRow(0)
         self._control_widgets.clear()
-        for spec in controls:
-            widget = self._control_widget(spec)
-            widget.setEnabled(spec.writable)
-            self._controls_form.addRow(spec.name, widget)
-            self._control_widgets[spec.name] = widget
-        self._controls_box.setVisible(bool(controls))
+
+        specs = {spec.name: spec for spec in controls}
+        self._control_values = {spec.name: spec.value for spec in controls}
+        grouped = [(title, [specs[name] for name in names if name in specs])
+                   for title, names in SETTING_GROUPS]
+        known = {name for _, names in SETTING_GROUPS for name in names}
+        grouped.append(("Other", [spec for spec in controls if spec.name not in known]))
+        for title, group in grouped:
+            box, form = self._setting_forms[title]
+            if group and title in GROUP_NOTES:
+                note = QtWidgets.QLabel(GROUP_NOTES[title])
+                note.setWordWrap(True)
+                form.addRow(note)
+            for spec in group:
+                label, help_text = SETTING_INFO.get(spec.name, (spec.name, ""))
+                parent = specs.get(SETTING_PARENTS.get(spec.name, ""))
+                enabled = spec.writable and (parent is None or bool(parent.value))
+                tooltip = "\n\n".join(filter(None, (
+                    help_text, f"Camera feature: {spec.name}",
+                    None if spec.writable else "Locked in the current mode.")))
+                label_widget = QtWidgets.QLabel(label)
+                widget = self._control_widget(spec)
+                widget.setEnabled(enabled)
+                label_widget.setEnabled(enabled)
+                for item in (label_widget, widget):
+                    item.setToolTip(tooltip)
+                if spec.name in SLIDER_LIMITS:  # a slider needs the full width
+                    form.addRow(label_widget)
+                    form.addRow(widget)
+                else:
+                    form.addRow(label_widget, widget)
+                self._control_widgets[spec.name] = widget
+            box.setVisible(bool(group))
+        self._settings_hint.setText(
+            "Hover over a setting for what it does. Changing one briefly restarts the stream."
+            if controls else "This camera reports no adjustable settings.")
 
     def _control_widget(self, spec: ControlSpec) -> QtWidgets.QWidget:
         send = self._thread.set_control
+        if (spec.name in SLIDER_LIMITS and spec.kind == "int"
+                and spec.minimum is not None and spec.maximum is not None):
+            return self._slider_control(spec)
         if spec.kind == "enum":
             widget = QtWidgets.QComboBox()
             widget.addItems(spec.options)
@@ -435,6 +573,44 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.editingFinished.connect(
                 lambda name=spec.name, widget=widget: send(name, widget.value()))
         return widget
+
+    def _slider_control(self, spec: ControlSpec) -> QtWidgets.QWidget:
+        """A slider beside a spin box. The camera gets the value when the slider is
+        released or the spin box is confirmed, since every change restarts the stream."""
+        limit = 2 ** 31 - 1  # QSlider and QSpinBox hold 32-bit values
+        low, high = int(max(spec.minimum, -limit)), int(min(spec.maximum, limit))
+        slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        slider.setRange(low, high)
+        slider.setSingleStep(5)
+        slider.setPageStep(50)
+        spin = QtWidgets.QSpinBox()
+        spin.setRange(low, high)
+        spin.setKeyboardTracking(False)
+        for widget in (slider, spin):
+            widget.setValue(int(spec.value))
+
+        def changed(value: int) -> None:
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+            if not slider.isSliderDown():  # a click on the track or a key press
+                self._send_limit(spec.name, value)
+        slider.valueChanged.connect(changed)
+        slider.sliderReleased.connect(lambda: self._send_limit(spec.name, slider.value()))
+        spin.editingFinished.connect(lambda: slider.setValue(spin.value()))
+        return self._clip_row(slider, spin)
+
+    def _send_limit(self, name: str, value: int) -> None:
+        """Send a limit, first moving its partner if the two would cross."""
+        if value == self._control_values.get(name):
+            return
+        partner, direction = SLIDER_LIMITS[name]
+        partner_value = self._control_values.get(partner)
+        if partner_value is not None and (value - partner_value) * direction > 0:
+            self._thread.set_control(partner, value)
+            self._control_values[partner] = value
+        self._thread.set_control(name, value)
+        self._control_values[name] = value
 
     # rendering -----------------------------------------------------------------
 

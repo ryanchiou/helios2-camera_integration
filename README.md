@@ -64,13 +64,25 @@ the camera before starting this application.**
 * **3D view**: the same frame as a point cloud in the camera's frame.
 * **Status bar**: frame rate, frame ID, share of valid pixels, and the median
   distance at the image centre (the `+` mark).
-* **Depth clip** hides points nearer than *Min* or farther than *Max* in the
-  depth map and the 3D view, for example to drop the background while aiming.
-  It is display only: captures still save every point.
 * **Capture frame** saves the next frame to the output folder.
-* **Camera settings** lists whichever tuning features the connected camera
-  exposes (operating mode, exposure, accumulation, filters). Changing one
+* **Camera settings** tab: whichever tuning features the connected camera
+  exposes, in three groups. Hover over a setting for what it does. Changing one
   briefly restarts the stream.
+  * *Mode and exposure*: operating mode, HDR mode, exposure, gain. While HDR is
+    on, the camera locks accumulation; the low-noise HDR modes run as slowly as
+    0.88 fps.
+  * *Noise filters*: accumulation, spatial filter, flying-pixel filter and
+    confidence filter. Each threshold is greyed out while its filter is off.
+  * *Distance limits (removes points)*: minimum and maximum radial distance,
+    applied in the camera, so points outside them are not saved. Each is a
+    slider that is sent to the camera when released.
+* **Display** tab, which changes only what is drawn:
+  * *Hide points (view only)* hides points nearer than *Min* or farther than
+    *Max* along the optical axis, for example to drop the background while
+    aiming. Captures still save every point.
+  * *Colour scale* sets the depth range the colours span, fitted to the scene
+    by default.
+  * *3D view*: point density and size.
 
 ### What a capture contains
 
@@ -86,7 +98,8 @@ the camera before starting this application.**
 ```python
 from scanner.camera import HeliosCamera, CameraSettings, save_capture, load_capture
 
-settings = CameraSettings(image_accumulation=4, spatial_filter=True)
+settings = CameraSettings(image_accumulation=4, spatial_filter=True,
+                          flying_pixels_removal=True, flying_pixels_threshold_mm=20)
 with HeliosCamera(settings=settings) as camera:
     camera.start(triggered=True)
     # ... move the robot, wait until it has settled ...

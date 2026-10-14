@@ -16,6 +16,12 @@ from ..camera import (Camera, CameraError, Frame, FrameTimeoutError,
 
 log = logging.getLogger(__name__)
 
+# Grabs time out quickly so requests from the UI are handled promptly. Some modes
+# (HDR, heavy accumulation) take over a second per frame, so only a longer gap
+# is reported as a problem.
+GRAB_TIMEOUT_S = 0.5
+NO_FRAMES_WARNING_S = 5.0
+
 
 class AcquisitionThread(QtCore.QThread):
     """Owns the camera: opens it, streams frames and runs requests from the UI.
@@ -41,6 +47,7 @@ class AcquisitionThread(QtCore.QThread):
         self._stop = threading.Event()
         self._capture_native: bool | None = None  # None = no capture pending
         self._last_frame_time = 0.0
+        self._waiting_since = 0.0  # when the stream last (re)started
         self.fps = 0.0
         self.frames_received = 0
         self.frames_dropped = 0
@@ -73,6 +80,7 @@ class AcquisitionThread(QtCore.QThread):
             camera.open()
             self.opened.emit(camera.info, camera.controls())
             camera.start()
+            self._waiting_since = time.monotonic()
             self.streaming_changed.emit(True)
             while not self._stop.is_set():
                 self._run_commands()
@@ -102,12 +110,14 @@ class AcquisitionThread(QtCore.QThread):
             if command == "stream":
                 camera.start() if argument else camera.stop()
                 self.fps = 0.0
+                self._waiting_since = time.monotonic()
                 self.streaming_changed.emit(camera.is_streaming)
             elif command == "control":
                 try:
                     camera.set_control(*argument)
                 except CameraError as exc:
                     self.warning.emit(str(exc))
+                self._waiting_since = time.monotonic()  # setting a control restarts the stream
                 self.controls_changed.emit(camera.controls())
             elif command == "capture":
                 if camera.is_streaming:
@@ -123,10 +133,12 @@ class AcquisitionThread(QtCore.QThread):
             if self._capture_native and camera.supports_native_ply:
                 native_ply = self._capture_dir / f"{name}_arena.ply"
         try:
-            frame = camera.grab(timeout_s=1.0, native_ply=native_ply)
+            frame = camera.grab(timeout_s=GRAB_TIMEOUT_S, native_ply=native_ply)
         except FrameTimeoutError:
-            self.fps = 0.0
-            self.warning.emit("No frames arriving from the camera")
+            waited = time.monotonic() - max(self._last_frame_time, self._waiting_since)
+            if waited > NO_FRAMES_WARNING_S:
+                self.fps = 0.0
+                self.warning.emit(f"No frames arriving from the camera for {waited:.0f} s")
             return
         except IncompleteFrameError as exc:
             self.frames_dropped += 1
